@@ -105,7 +105,6 @@ torc_node_benchmark_times = []
 torc_node_weights = []
 torc_weighted_rr_state = []
 torc_weighted_node_index = 0
-torc_node_worker_offsets = []
 torc_sched_lock = threading.Lock()
 
 # Flags
@@ -186,7 +185,6 @@ def _schedule_round_robin():
 def _schedule_weighted():
     """Schedule according to node benchmark weights."""
     global torc_weighted_node_index
-    global torc_node_worker_offsets
 
     with torc_sched_lock:
         if not torc_node_weights or not torc_weighted_rr_state:
@@ -195,10 +193,7 @@ def _schedule_weighted():
         target_node = torc_weighted_rr_state[torc_weighted_node_index]
         torc_weighted_node_index = (torc_weighted_node_index + 1) % len(torc_weighted_rr_state)
 
-        local_offset = torc_node_worker_offsets[target_node]
-        torc_node_worker_offsets[target_node] = (local_offset + 1) % num_local_workers()
-
-        qid = target_node * num_local_workers() + local_offset
+        qid = target_node * num_local_workers()
 
     return qid
 
@@ -887,7 +882,6 @@ def init_node_weights(bench_f, *args, **kwargs):
     global torc_node_weights
     global torc_weighted_rr_state
     global torc_weighted_node_index
-    global torc_node_worker_offsets
 
     t_all = []
     for node in range(num_nodes()):
@@ -912,7 +906,6 @@ def init_node_weights(bench_f, *args, **kwargs):
         torc_node_weights = weights
         torc_weighted_rr_state = state
         torc_weighted_node_index = 0
-        torc_node_worker_offsets = [0 for _ in range(num_nodes())]
 
     if node_id() == 0:
         _torc_log.warning("Benchmark times per node: {}".format(times))
