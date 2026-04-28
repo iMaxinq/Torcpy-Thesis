@@ -918,26 +918,59 @@ def init_node_weights(bench_f, *args, **kwargs):
         _torc_log.warning("Derived node weights: {}".format(weights))
         _torc_log.warning("State table: {}".format(state))
 
-def benchmark_task():
+# hardcoded benchmarks provided by the library
+def benchmark_cpu():
+    """Stresses the ALU with tight integer math loops."""
     x = 0
     for i in range(5_000_000):
         x += (i % 97) * (i % 89)
     return x
 
-def start(main_function):
-    """Initialize the library, start the primary application task and after its completion
-       shutdown the library
+def benchmark_memory():
+    """Stresses RAM bandwidth and cache by allocating and modifying a large array."""
+    size = 5_000_000
+    data = [0] * size
+    for i in range(size):
+        data[i] = i % 256
+    return sum(data)
+
+def benchmark_io():
+    """Simulates I/O bound tasks (like network requests or disk reads). Essentially, round-robin"""
+    time.sleep(0.5)
+    return True
+
+
+def start(main_function, profile="cpu"):
+    """Initialize the library, start the primary application task, and shutdown.
 
     Args:
-        main_function:
-
-    Returns:
-        Nothing
+        main_function: The main application entry point.
+        profile: The benchmark profile to use for 'weighted' scheduling.
+                 Accepts 'cpu', 'memory', 'io', or a custom callable function.
     """
 
     init()
+
     if TORC_SCHEDULING == "weighted":
-        init_node_weights(benchmark_task)
+        # Determine which benchmark to run
+        if callable(profile):
+            bench_f = profile
+            _torc_log.info("Using custom user-defined benchmark profile.")
+        elif profile == "cpu":
+            bench_f = benchmark_cpu
+            _torc_log.info("Using built-in 'CPU' benchmark profile.")
+        elif profile == "memory":
+            bench_f = benchmark_memory
+            _torc_log.info("Using built-in 'MEMORY' benchmark profile.")
+        elif profile == "io":
+            bench_f = benchmark_io
+            _torc_log.info("Using built-in 'IO' benchmark profile.")
+        else:
+            _torc_log.warning(f"Unknown profile '{profile}'. Defaulting to 'cpu'.")
+            bench_f = benchmark_cpu
+
+        init_node_weights(bench_f)
+
     launch(main_function)
     finalize()
 
