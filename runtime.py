@@ -349,16 +349,17 @@ def _do_work(task):
     task["t_finish"] = time.time()
 
     # create logs
-    q_len = sum(torc_q[i].qsize() for i in range(TORC_QUEUE_LEVELS))
-    with torc_history_lock:
-        torc_task_history.append({
-            "task_id": task["mytask"],
-            "worker": worker_id(),
-            "t_ready": task.get("t_ready", 0.0),
-            "t_start": task["t_start"],
-            "t_finish": task["t_finish"],
-            "q_len": q_len
-        })
+    if task.get("counted", True):
+        q_len = sum(torc_q[i].qsize() for i in range(TORC_QUEUE_LEVELS))
+        with torc_history_lock:
+            torc_task_history.append({
+                "task_id": task["mytask"],
+                "worker": worker_id(),
+                "t_ready": task.get("t_ready", 0.0),
+                "t_start": task["t_start"],
+                "t_finish": task["t_finish"],
+                "q_len": q_len
+            })
 
     # send answer and results back to the homenode of the task
     if node_id() == task["homenode"]:
@@ -888,6 +889,11 @@ def init_node_weights(bench_f, *args, **kwargs):
     global torc_node_weights
     global torc_weighted_rr_state
     global torc_weighted_node_index
+    global TORC_STEALING_ENABLED
+
+    # Disable stealing so that no node steals the benchmark task
+    original_stealing_state = TORC_STEALING_ENABLED
+    TORC_STEALING_ENABLED = False
 
     t_all = []
     for node in range(num_nodes()):
@@ -902,6 +908,9 @@ def init_node_weights(bench_f, *args, **kwargs):
         t_all.append(task)
 
     waitall()
+
+    # restore stealing state
+    TORC_STEALING_ENABLED = original_stealing_state
 
     times = [task.result() for task in t_all]
     weights = _compute_node_weights(times)
