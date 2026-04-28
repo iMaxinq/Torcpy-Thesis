@@ -703,7 +703,7 @@ def init():
     TORC_SERVER_YIELDTIME = float(os.getenv("TORCPY_SERVER_YIELDTIME", 0.01))
     TORC_WORKER_YIELDTIME = float(os.getenv("TORCPY_WORKER_YIELDTIME", 0.01))
     TORC_SCHEDULING = os.getenv("TORCPY_SCHEDULING", "round_robin").strip().lower()
-    TORC_PRINT_STATS = os.getenv("TORC_PRINT_STATS", False)
+    TORC_PRINT_STATS = os.getenv("TORCPY_PRINT_STATS", False)
     if TORC_SCHEDULING not in ("round_robin", "weighted", "heft"):
         raise ValueError("Invalid TORCPY_SCHEDULING='{}'; expected 'round_robin' or 'weighted' or 'heft'".format(TORC_SCHEDULING))
 
