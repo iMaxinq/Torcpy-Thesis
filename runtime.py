@@ -73,6 +73,7 @@ TORC_STEALING_ENABLED = False
 TORC_SERVER_YIELDTIME = 0.01
 TORC_WORKER_YIELDTIME = 0.01
 TORC_SCHEDULING = "round_robin"
+TORC_PRINT_STATS = False
 
 # TORC data: task queue, thread local storage, MPI communicator
 torc_q = []
@@ -673,7 +674,7 @@ def init():
     global torc_last_qid
     global torc_num_workers
     global TORC_STEALING_ENABLED
-    global TORC_SERVER_YIELDTIME, TORC_WORKER_YIELDTIME, TORC_SCHEDULING
+    global TORC_SERVER_YIELDTIME, TORC_WORKER_YIELDTIME, TORC_SCHEDULING, TORC_PRINT_STATS
     global _torc_inited
 
     if _torc_inited is True:
@@ -702,6 +703,7 @@ def init():
     TORC_SERVER_YIELDTIME = float(os.getenv("TORCPY_SERVER_YIELDTIME", 0.01))
     TORC_WORKER_YIELDTIME = float(os.getenv("TORCPY_WORKER_YIELDTIME", 0.01))
     TORC_SCHEDULING = os.getenv("TORCPY_SCHEDULING", "round_robin").strip().lower()
+    TORC_PRINT_STATS = os.getenv("TORC_PRINT_STATS", False)
     if TORC_SCHEDULING not in ("round_robin", "weighted", "heft"):
         raise ValueError("Invalid TORCPY_SCHEDULING='{}'; expected 'round_robin' or 'weighted' or 'heft'".format(TORC_SCHEDULING))
 
@@ -782,7 +784,8 @@ def finalize():
     if torc_use_server:
         torc_server_thread.join()
 
-    _print_stats()
+    if TORC_PRINT_STATS:
+        _print_stats()
     torc_comm.barrier()
 
 
