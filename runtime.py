@@ -872,12 +872,19 @@ def _compute_node_weights(times):
 
     return [s / total_speed for s in speeds]
 
-def _build_weighted_rr_state(weights, table_size=100):
-    state = []
 
-    for node, w in enumerate(weights):
-        count = max(1, int(round(w * table_size)))
-        state.extend([node] * count)
+def _build_weighted_rr_state(weights, table_size=100):
+    counts = [max(1, int(round(w * table_size))) for w in weights]
+    total_slots = sum(counts)
+
+    positions = []
+    for node, count in enumerate(counts):
+        for i in range(count):
+            ideal_idx = (i + 0.5) * (total_slots / count)
+            positions.append((ideal_idx, node))
+
+    positions.sort()
+    state = [node for ideal_idx, node in positions]
 
     if not state:
         state = list(range(num_nodes()))
