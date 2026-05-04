@@ -245,7 +245,6 @@ def _schedule_HEFT(args, kwargs):
                 min_eft = eft
                 best_node = i
 
-        print(best_node)
         qid = best_node * num_local_workers()
 
     return qid
