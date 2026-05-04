@@ -65,6 +65,8 @@ except:
 # Constants - to be moved to constants.py
 TORC_SERVER_TAG = 100
 TORC_STEAL_RESPONSE_TAG = 101
+TORC_HEARTBEAT_TAG = 102
+TORC_LOAD_UPDATE_INTERVAL = 0.1
 TORC_TASK_YIELDTIME = 0.0001
 TORC_QUEUE_LEVELS = 10
 
@@ -107,6 +109,13 @@ torc_node_weights = []
 torc_weighted_rr_state = []
 torc_weighted_node_index = 0
 torc_sched_lock = threading.Lock()
+
+# Torc HEFT scheduling variables
+torc_hostnames = []
+torc_intra_rate_bps = float('inf')  # Bytes per second (Same Chip)
+torc_inter_rate_bps = float('inf')  # Bytes per second (Wi-Fi)
+TORC_ESTIMATED_TASK_BYTES = 0
+torc_node_estimated_load = []
 
 # Flags
 _torc_shutdowned = False
@@ -182,7 +191,6 @@ def _schedule_round_robin():
 
     return qid
 
-
 def _schedule_weighted():
     """Schedule according to node benchmark weights."""
     global torc_weighted_node_index
@@ -198,10 +206,69 @@ def _schedule_weighted():
 
     return qid
 
-def _schedule_HEFT():
-    print("HEFT")
-    return _schedule_round_robin()
+def _schedule_HEFT(args, kwargs):
+    """Return the next worker id using Dynamic Earliest Finish Time."""
+    global torc_node_benchmark_times
+    global torc_hostnames, torc_intra_rate_bps, torc_inter_rate_bps
+    global TORC_ESTIMATED_TASK_BYTES
 
+    if not torc_node_benchmark_times or not torc_hostnames:
+        return _schedule_round_robin()
+
+    best_node = 0
+    min_eft = float('inf')
+    my_hostname = MPI.Get_processor_name()
+    param_bytes = _estimate_payload_bytes(args, kwargs)
+    total_task_bytes = TORC_ESTIMATED_TASK_BYTES + param_bytes
+
+    with torc_sched_lock:
+        for i in range(num_nodes()):
+            # Computational Cost
+            exec_cost = torc_node_benchmark_times[i]
+
+            # Communication Cost
+            if i == node_id():
+                comm_cost = 0.0  # Same process
+            elif torc_hostnames[i] == my_hostname:
+                comm_cost = total_task_bytes / torc_intra_rate_bps  # Same chip
+            else:
+                comm_cost = total_task_bytes / torc_inter_rate_bps  # Via wifi
+
+            # Load Cost
+            current_tasks = torc_node_estimated_load[i]
+            ready_time = (current_tasks / num_local_workers()) * exec_cost
+
+            # Calculate Earliest Finish Time
+            eft = ready_time + comm_cost + exec_cost
+
+            if eft < min_eft:
+                min_eft = eft
+                best_node = i
+
+        qid = best_node * num_local_workers()
+
+    return qid
+
+def _estimate_payload_bytes(args, kwargs):
+    """Fast estimation of argument byte size to avoid pickling overhead."""
+    total_bytes = 0
+
+    # Check positional args
+    for arg in args:
+        if hasattr(arg, 'nbytes'):  # Instant accurate size for NumPy arrays
+            total_bytes += arg.nbytes
+        else:
+            total_bytes += sys.getsizeof(arg)  # Fast but shallow estimate
+
+    # Check keyword args
+    for k, v in kwargs.items():
+        total_bytes += sys.getsizeof(k)
+        if hasattr(v, 'nbytes'):
+            total_bytes += v.nbytes
+        else:
+            total_bytes += sys.getsizeof(v)
+
+    return total_bytes
 
 def submit(f, *a, qid=-1, callback=None, async_callback=True, counted=True, **kwargs):
     """Submit a task to be executed with the given arguments.
@@ -233,7 +300,7 @@ def submit(f, *a, qid=-1, callback=None, async_callback=True, counted=True, **kw
         elif TORC_SCHEDULING == "weighted":
             qid = _schedule_weighted()
         elif TORC_SCHEDULING == "heft":
-            qid = _schedule_HEFT()
+            qid = _schedule_HEFT(a, kwargs)
 
     if qid is not None:
         qid = qid % num_workers()
@@ -528,80 +595,92 @@ def _worker(w_id):
 
 def _server():
     global torc_exit_flag, torc_executed
+    global torc_node_estimated_load
 
     torc_tls.id = -1
 
     status = MPI.Status()  # get MPI status object
 
+    last_load_update = time.time()
+    active_reqs = []
+
     while True:
-        while not torc_comm.Iprobe(source=MPI.ANY_SOURCE, tag=TORC_SERVER_TAG, status=status):
-            time.sleep(TORC_SERVER_YIELDTIME)  # 0.01 for DIAC, 0.0001 for demo
+        has_server_msg = torc_comm.Iprobe(source=MPI.ANY_SOURCE, tag=TORC_SERVER_TAG, status=status)
+        if has_server_msg:
+            source_rank = status.Get_source()
+            source_tag = status.Get_tag()
+            task = torc_comm.recv(source=source_rank, tag=source_tag, status=status)
 
-        source_rank = status.Get_source()
-        source_tag = status.Get_tag()
-        task = torc_comm.recv(source=source_rank, tag=source_tag, status=status)
-        source_rank = status.Get_source()
-        source_tag = status.Get_tag()
+            ttype = task["type"]
 
-        ttype = task["type"]
+            if ttype == "exit":
+                torc_exit_flag = True
+                for i in range(torc_num_workers):
+                    enqueue(TORC_QUEUE_LEVELS, None)
+                break
 
-        if ttype == "exit":
-            # Stop worker(s)
-            torc_exit_flag = True
-            for i in range(torc_num_workers):
-                # torc_q[0].put(None)
-                enqueue(TORC_QUEUE_LEVELS, None)
-            break
+            elif ttype == "enqueue":
+                task["source_rank"] = source_rank
+                task["source_tag"] = source_tag
+                enqueue(task["level"], task)
 
-        elif ttype == "enqueue":
-            # Enqueue task
+            elif ttype == "answer":
+                real_task = ctypes.cast(task["mytask"], ctypes.py_object).value
+                real_task["out"] = copy.copy(task["out"])
 
-            task["source_rank"] = source_rank
-            task["source_tag"] = source_tag
+                parent = ctypes.cast(task["parent"], ctypes.py_object).value
+                torc_deps_lock.acquire()
+                parent["deps"] -= 1
+                parent["completed"].append(real_task)
+                torc_deps_lock.release()
 
-            # torc_q[0].put(task)
-            enqueue(task["level"], task)
+                cb_task = real_task["cbtask"]
+                if cb_task is not None:
+                    cb_task["args"] = TaskT(real_task)
+                    if real_task["async_callback"]:
+                        enqueue(cb_task["level"], cb_task)
+                    else:
+                        cb_task["f"](cb_task["args"])
+                        if real_task["counted"]:
+                            torc_stats_lock.acquire()
+                            torc_executed += 1
+                            torc_stats_lock.release()
 
-        elif ttype == "answer":
-
-            real_task = ctypes.cast(task["mytask"], ctypes.py_object).value
-            real_task["out"] = copy.copy(task["out"])
-
-            # satisfy dependencies
-            parent = ctypes.cast(task["parent"], ctypes.py_object).value
-            torc_deps_lock.acquire()
-            parent["deps"] -= 1
-            parent["completed"].append(real_task)
-            torc_deps_lock.release()
-
-            # trigger the callback function
-            cb_task = real_task["cbtask"]
-            if cb_task is not None:
-                cb_task["args"] = TaskT(real_task)
-                if real_task["async_callback"]:
-                    enqueue(cb_task["level"], cb_task)
+            elif ttype == "steal":
+                t = dequeue_steal()
+                if t is None:
+                    torc_q[TORC_QUEUE_LEVELS].put(t)
+                    t = dict()
+                    t["type"] = "nowork"
+                elif not t:
+                    t["type"] = "nowork"
                 else:
-                    cb_task["f"](cb_task["args"])
-                    if real_task["counted"]:
-                        torc_stats_lock.acquire()
-                        torc_executed += 1
-                        torc_stats_lock.release()
+                    t["type"] = "stolen"
+                torc_comm.send(t, dest=source_rank, tag=TORC_STEAL_RESPONSE_TAG)
 
-        elif ttype == "steal":
-            t = dequeue_steal()
-            if t is None:
-                torc_q[TORC_QUEUE_LEVELS].put(t)
-                t = dict()
-                t["type"] = "nowork"
-            elif not t:
-                t["type"] = "nowork"
-            else:
-                t["type"] = "stolen"
+        has_load_update_msg = torc_comm.Iprobe(source=MPI.ANY_SOURCE, tag=TORC_HEARTBEAT_TAG, status=status)
+        if has_load_update_msg:
+            source_rank = status.Get_source()
+            q_size = torc_comm.recv(source=source_rank, tag=TORC_HEARTBEAT_TAG, status=status)
+            torc_node_estimated_load[source_rank] = q_size
 
-            torc_comm.send(t, dest=source_rank, tag=TORC_STEAL_RESPONSE_TAG)
+        if not has_server_msg and not has_load_update_msg:
+            time.sleep(TORC_SERVER_YIELDTIME)
 
-        else:
-            _torc_log.warning("Unknown task type")
+        now = time.time()
+
+        if now - last_load_update >= TORC_LOAD_UPDATE_INTERVAL:
+            local_q_size = sum(torc_q[i].qsize() for i in range(TORC_QUEUE_LEVELS))
+            torc_node_estimated_load[node_id()] = local_q_size
+
+            for i in range(num_nodes()):
+                if i != node_id():
+                    req = torc_comm.isend(local_q_size, dest=i, tag=TORC_HEARTBEAT_TAG)
+                    active_reqs.append(req)
+
+            last_load_update = now
+
+        active_reqs = [req for req in active_reqs if not req.Test()]
 
 
 """
@@ -720,6 +799,10 @@ def init():
     main_task["completed"] = []
     torc_tls.curr_task = main_task
     torc_last_qid = node_id() * torc_num_workers
+
+    # initialize load array
+    global torc_node_estimated_load
+    torc_node_estimated_load = [0] * num_nodes()
 
     if num_nodes() == 1:
         torc_use_server = False
@@ -849,6 +932,7 @@ def launch(main_function):
             finalize()
             sys.exit(0)
 
+# weighted scheduling functions
 def _run_node_benchmark(bench_f, *args, **kwargs):
     t0 = time.time()
     bench_f(*args, **kwargs)
@@ -871,7 +955,6 @@ def _compute_node_weights(times):
         return [1.0 / n for _ in range(n)]
 
     return [s / total_speed for s in speeds]
-
 
 def _build_weighted_rr_state(weights, table_size=100):
     counts = [max(1, int(round(w * table_size))) for w in weights]
@@ -955,19 +1038,132 @@ def benchmark_io():
     time.sleep(0.5)
     return True
 
+# HEFT scheduling functions
+def _benchmark_network_rates(payload_bytes=1024 * 1024, iterations=10):
+    global torc_hostnames, torc_intra_rate_bps, torc_inter_rate_bps
+
+    my_hostname = MPI.Get_processor_name()
+    all_hostnames = torc_comm.allgather(my_hostname)  # all processor names sorted by rank
+
+    me = node_id()
+    n_nodes = num_nodes()
+
+    local_target = None
+    remote_target = None
+
+    # Rank 0 figures out who to test with
+    if me == 0:
+        for i in range(1, n_nodes):
+            if all_hostnames[i] == my_hostname and local_target is None:
+                local_target = i
+            elif all_hostnames[i] != my_hostname and remote_target is None:
+                remote_target = i
+
+    # Broadcast the chosen targets so those specific ranks know to participate
+    local_target, remote_target = torc_comm.bcast((local_target, remote_target), root=0)
+
+    dummy_task = bytearray(payload_bytes)
+
+    # Intra-node benchmark (Local)
+    intra_rate = float('inf')
+    if local_target is not None:
+        if me == 0:
+            torc_comm.barrier()
+            times = []
+            for _ in range(iterations):
+                t0 = time.time()
+                torc_comm.send(dummy_task, dest=local_target, tag=999)
+                torc_comm.recv(source=local_target, tag=999)
+                t1 = time.time()
+                times.append(t1 - t0)
+
+            avg_ping_pong = sum(times) / len(times)
+            avg_send_time = avg_ping_pong / 2.0
+
+            # bytes/sec rate
+            intra_rate = payload_bytes / avg_send_time
+
+        elif me == local_target:
+            torc_comm.barrier()
+            for _ in range(iterations):
+                msg = torc_comm.recv(source=0, tag=999)
+                torc_comm.send(msg, dest=0, tag=999)
+        else:
+            torc_comm.barrier()
+
+    # Inter-node benchmark (Wi-Fi/Network)
+    inter_rate = float('inf')
+    if remote_target is not None:
+        if me == 0:
+            torc_comm.barrier()
+            times = []
+            for _ in range(iterations):
+                t0 = time.time()
+                torc_comm.send(dummy_task, dest=remote_target, tag=999)
+                torc_comm.recv(source=remote_target, tag=999)
+                t1 = time.time()
+                times.append(t1 - t0)
+
+            avg_ping_pong = sum(times) / len(times)
+            avg_send_time = avg_ping_pong / 2.0
+
+            # bytes/sec rate
+            inter_rate = payload_bytes / avg_send_time
+
+        elif me == remote_target:
+            torc_comm.barrier()
+            for _ in range(iterations):
+                msg = torc_comm.recv(source=0, tag=999)
+                torc_comm.send(msg, dest=0, tag=999)
+        else:
+            torc_comm.barrier()
+
+    intra_rate = torc_comm.bcast(intra_rate, root=0)
+    inter_rate = torc_comm.bcast(inter_rate, root=0)
+
+    with torc_sched_lock:  # not needed now but could be later
+        torc_hostnames = all_hostnames
+        torc_intra_rate_bps = intra_rate
+        torc_inter_rate_bps = inter_rate
+
+    if me == 0:
+        _torc_log.info(
+            f"Network Bench: Intra-node = {intra_rate / 1e6:.2f} MB/s | Inter-node = {inter_rate / 1e6:.2f} MB/s")
+
+def _calculate_base_task_bytes():
+    global TORC_ESTIMATED_TASK_BYTES
+
+    dummy_task = dict()
+    dummy_task["t_ready"] = time.time()
+    dummy_task["varg"] = False
+    dummy_task["mytask"] = id(dummy_task)
+    dummy_task["f"] = None
+    dummy_task["cb"] = None
+    dummy_task["async_callback"] = False
+    dummy_task["args"] = None
+    dummy_task["kwargs"] = {}
+    dummy_task["out"] = None
+    dummy_task["homenode"] = node_id()
+    dummy_task["deps"] = 0
+    dummy_task["counted"] = True
+    dummy_task["completed"] = []
+    dummy_task["level"] = 0
+    dummy_task["cbtask"] = None
+    dummy_task["parent"] = id(dummy_task)
+
+    exact_bytes = len(pickle.dumps(dummy_task))
+
+    if node_id() == 0:
+        _torc_log.info(f"Calculated Base Task Overhead: {exact_bytes} bytes")
+
+    TORC_ESTIMATED_TASK_BYTES = exact_bytes
 
 def start(main_function, profile="cpu"):
-    """Initialize the library, start the primary application task, and shutdown.
-
-    Args:
-        main_function: The main application entry point.
-        profile: The benchmark profile to use for 'weighted' scheduling.
-                 Accepts 'cpu', 'memory', 'io', or a custom callable function.
-    """
+    """Initialize the library, start the primary application task, and shutdown."""
 
     init()
 
-    if TORC_SCHEDULING == "weighted":
+    if TORC_SCHEDULING in ("weighted", "heft"):
         # Determine which benchmark to run
         if callable(profile):
             bench_f = profile
@@ -986,6 +1182,10 @@ def start(main_function, profile="cpu"):
             bench_f = benchmark_cpu
 
         init_node_weights(bench_f)
+
+        if TORC_SCHEDULING == "heft":
+            _calculate_base_task_bytes()
+            _benchmark_network_rates()
 
     launch(main_function)
     finalize()
