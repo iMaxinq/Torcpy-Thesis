@@ -116,6 +116,8 @@ torc_intra_rate_bps = float('inf')  # Bytes per second (Same Chip)
 torc_inter_rate_bps = float('inf')  # Bytes per second (Wi-Fi)
 TORC_ESTIMATED_TASK_BYTES = 0
 torc_node_estimated_load = []
+torc_local_active_tasks = 0
+torc_pending_tasks = []
 
 # Flags
 _torc_shutdowned = False
@@ -235,7 +237,7 @@ def _schedule_HEFT(args, kwargs):
                 comm_cost = total_task_bytes / torc_inter_rate_bps  # Via wifi
 
             # Load Cost
-            current_tasks = torc_node_estimated_load[i]
+            current_tasks = torc_node_estimated_load[i] + torc_pending_tasks[i]
             ready_time = (current_tasks / num_local_workers()) * exec_cost
 
             # Calculate Earliest Finish Time
@@ -245,7 +247,6 @@ def _schedule_HEFT(args, kwargs):
                 min_eft = eft
                 best_node = i
 
-        torc_node_estimated_load[best_node] += 1
         qid = best_node * num_local_workers()
 
     return qid
@@ -306,6 +307,8 @@ def submit(f, *a, qid=-1, callback=None, async_callback=True, counted=True, **kw
     if qid is not None:
         qid = qid % num_workers()
         qid = int(qid / num_local_workers())
+
+    torc_pending_tasks[qid] += 1
 
     # Prepare the task descriptor
     task = dict()
@@ -432,6 +435,7 @@ def _do_work(task):
     # send answer and results back to the homenode of the task
     if node_id() == task["homenode"]:
 
+        torc_pending_tasks[node_id()] = max(0, torc_pending_tasks[node_id()] - 1)
         task = ctypes.cast(task["mytask"], ctypes.py_object).value  # real task
         task["out"] = copy.copy(y)
 
@@ -626,6 +630,7 @@ def _server():
                 enqueue(task["level"], task)
 
             elif ttype == "answer":
+                torc_pending_tasks[source_rank] = max(0, torc_pending_tasks[source_rank] - 1)
                 real_task = ctypes.cast(task["mytask"], ctypes.py_object).value
                 real_task["out"] = copy.copy(task["out"])
 
@@ -802,8 +807,9 @@ def init():
     torc_last_qid = node_id() * torc_num_workers
 
     # initialize load array
-    global torc_node_estimated_load
+    global torc_node_estimated_load, torc_pending_tasks
     torc_node_estimated_load = [0] * num_nodes()
+    torc_pending_tasks = [0] * num_nodes()
 
     if num_nodes() == 1:
         torc_use_server = False
