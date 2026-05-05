@@ -245,6 +245,7 @@ def _schedule_HEFT(args, kwargs):
                 min_eft = eft
                 best_node = i
 
+        torc_node_estimated_load[best_node] += 1
         qid = best_node * num_local_workers()
 
     return qid
