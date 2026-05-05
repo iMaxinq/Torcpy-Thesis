@@ -66,7 +66,7 @@ except:
 TORC_SERVER_TAG = 100
 TORC_STEAL_RESPONSE_TAG = 101
 TORC_HEARTBEAT_TAG = 102
-TORC_LOAD_UPDATE_INTERVAL = 0.1
+TORC_LOAD_UPDATE_INTERVAL = 0.01
 TORC_TASK_YIELDTIME = 0.0001
 TORC_QUEUE_LEVELS = 10
 
@@ -245,7 +245,6 @@ def _schedule_HEFT(args, kwargs):
                 min_eft = eft
                 best_node = i
 
-        torc_node_estimated_load[best_node] += 1
         qid = best_node * num_local_workers()
 
     return qid
