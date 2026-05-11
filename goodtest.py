@@ -87,7 +87,7 @@ def run_analysis():
         start = time.time()
 
         if label.startswith("T2"):
-            func()  # Launch root
+            root_task = func()  # CRITICAL: Catch the task to keep it in memory!
             runtime.waitall()
         else:
             func(*args)
