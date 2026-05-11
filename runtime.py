@@ -223,32 +223,29 @@ def _schedule_HEFT(args, kwargs):
     param_bytes = _estimate_payload_bytes(args, kwargs)
     total_task_bytes = TORC_ESTIMATED_TASK_BYTES + param_bytes
 
-    with torc_sched_lock:
-        for i in range(num_nodes()):
-            # Computational Cost
-            exec_cost = torc_node_benchmark_times[i]
+    for i in range(num_nodes()):
+        # Computational Cost
+        exec_cost = torc_node_benchmark_times[i]
 
-            # Communication Cost
-            if i == node_id():
-                comm_cost = 0.0  # Same process
-            elif torc_hostnames[i] == my_hostname:
-                comm_cost = total_task_bytes / torc_intra_rate_bps  # Same chip
-            else:
-                comm_cost = total_task_bytes / torc_inter_rate_bps  # Via wifi
+        # Communication Cost
+        if i == node_id():
+            comm_cost = 0.0  # Same process
+        elif torc_hostnames[i] == my_hostname:
+            comm_cost = total_task_bytes / torc_intra_rate_bps  # Same chip
+        else:
+            comm_cost = total_task_bytes / torc_inter_rate_bps  # Via wifi
 
-            # Load Cost
-            current_tasks = torc_node_estimated_load[i] + torc_pending_tasks[i]
-            ready_time = (current_tasks / num_local_workers()) * exec_cost
+        # Load Cost
+        current_tasks = torc_node_estimated_load[i] + torc_pending_tasks[i]
+        ready_time = (current_tasks / num_local_workers()) * exec_cost
 
-            # Calculate Earliest Finish Time
-            eft = ready_time + comm_cost + exec_cost
+        # Calculate Earliest Finish Time
+        eft = ready_time + comm_cost + exec_cost
+        if eft < min_eft:
+            min_eft = eft
+            best_node = i
 
-            if eft < min_eft:
-                min_eft = eft
-                best_node = i
-
-        qid = best_node * num_local_workers()
-
+    qid = best_node * num_local_workers()
     return qid
 
 def _estimate_payload_bytes(args, kwargs):
@@ -1165,8 +1162,10 @@ def _calculate_base_task_bytes():
 
     TORC_ESTIMATED_TASK_BYTES = exact_bytes
 
-def start(main_function, profile="cpu"):
+def start(main_function, profile="cpu", bench_args=(), bench_kwargs=None):
     """Initialize the library, start the primary application task, and shutdown."""
+    if bench_kwargs is None:
+        bench_kwargs = {}
 
     init()
 
@@ -1188,7 +1187,7 @@ def start(main_function, profile="cpu"):
             _torc_log.warning(f"Unknown profile '{profile}'. Defaulting to 'cpu'.")
             bench_f = benchmark_cpu
 
-        init_node_weights(bench_f)
+        init_node_weights(bench_f, *bench_args, **bench_kwargs)
 
         if TORC_SCHEDULING == "heft":
             _calculate_base_task_bytes()
