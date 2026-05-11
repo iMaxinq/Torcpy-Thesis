@@ -102,6 +102,9 @@ torc_history_lock = threading.Lock()
 torc_total_steal_attempts = 0
 torc_total_stolen_bytes = 0
 torc_steal_stats_lock = threading.Lock()
+torc_stolen_executed = 0
+torc_overhead_scheduling = 0.0
+torc_overhead_byte_count = 0.0
 
 # Torc weighted scheduling variables
 torc_node_benchmark_times = []
@@ -213,6 +216,7 @@ def _schedule_HEFT(args, kwargs):
     global torc_node_benchmark_times
     global torc_hostnames, torc_intra_rate_bps, torc_inter_rate_bps
     global TORC_ESTIMATED_TASK_BYTES
+    global torc_overhead_byte_count
 
     if not torc_node_benchmark_times or not torc_hostnames:
         return _schedule_round_robin()
@@ -220,7 +224,14 @@ def _schedule_HEFT(args, kwargs):
     best_node = 0
     min_eft = float('inf')
     my_hostname = MPI.Get_processor_name()
+
+    t_byte_start = time.time()
     param_bytes = _estimate_payload_bytes(args, kwargs)
+    t_byte_end = time.time()
+
+    with torc_stats_lock:
+        torc_overhead_byte_count += (t_byte_end - t_byte_start)
+
     total_task_bytes = TORC_ESTIMATED_TASK_BYTES + param_bytes
 
     for i in range(num_nodes()):
@@ -284,22 +295,25 @@ def submit(f, *a, qid=-1, callback=None, async_callback=True, counted=True, **kw
         A `Future` representing the given call.
     """
 
-    global torc_last_qid
-    global torc_created
+    global torc_last_qid, torc_created, torc_overhead_scheduling
 
     if qid is not None and qid >= num_workers():
         _torc_log.error("submit: invalid qid value ({})".format(qid))
         raise ValueError
 
-    # Cyclic task distribution
-    # Scheduling policy
+        # Cyclic task distribution / Scheduling policy
     if qid == -1:
+        t_sched_start = time.time()
         if TORC_SCHEDULING == "round_robin":
             qid = _schedule_round_robin()
         elif TORC_SCHEDULING == "weighted":
             qid = _schedule_weighted()
         elif TORC_SCHEDULING == "heft":
             qid = _schedule_HEFT(a, kwargs)
+        t_sched_end = time.time()
+
+        with torc_stats_lock:
+            torc_overhead_scheduling += (t_sched_end - t_sched_start)
 
     if qid is not None:
         qid = qid % num_workers()
@@ -394,7 +408,11 @@ def submit(f, *a, qid=-1, callback=None, async_callback=True, counted=True, **kw
 
 
 def _do_work(task):
-    global torc_executed
+    global torc_executed, torc_stolen_executed
+
+    if task.get("type") == "stolen":
+        with torc_stats_lock:
+            torc_stolen_executed += 1
 
     if num_nodes() > 1:
         time.sleep(TORC_TASK_YIELDTIME)
@@ -415,19 +433,6 @@ def _do_work(task):
             y = f(args, **kwargs)
 
     task["t_finish"] = time.time()
-
-    # create logs
-    if task.get("counted", True):
-        q_len = sum(torc_q[i].qsize() for i in range(TORC_QUEUE_LEVELS))
-        with torc_history_lock:
-            torc_task_history.append({
-                "task_id": task["mytask"],
-                "worker": worker_id(),
-                "t_ready": task.get("t_ready", 0.0),
-                "t_start": task["t_start"],
-                "t_finish": task["t_finish"],
-                "q_len": q_len
-            })
 
     # send answer and results back to the homenode of the task
     if node_id() == task["homenode"]:
@@ -829,28 +834,30 @@ def _terminate_nodes():
 
 
 def _print_stats():
-    global torc_created, torc_executed, torc_total_steal_attempts, torc_total_stolen_bytes
+    global torc_created, torc_executed, torc_stolen_executed
+    global torc_total_steal_attempts, torc_total_stolen_bytes
+    global torc_overhead_scheduling, torc_overhead_byte_count
+
     me = node_id()
-    msg = "\nTORCPY: node[{}]: created={}, executed={}".format(me, torc_created, torc_executed)
+    msg = f"\nTORCPY: node[{me}]: created={torc_created}, executed={torc_executed}, stolen_executed={torc_stolen_executed}"
     steal_msg = f"        node[{me}]: total steal attempts={torc_total_steal_attempts}, stolen bytes={torc_total_stolen_bytes} bytes"
+    overhead_msg = f"        node[{me}]: OVERHEADS -> Scheduling: {torc_overhead_scheduling:.6f}s | Byte Count: {torc_overhead_byte_count:.6f}s"
+
     cprint(msg, "green")
     cprint(steal_msg, "cyan")
+    cprint(overhead_msg, "yellow")
 
-    print(f"=== Node {me} Task History ===")
-    for stat in torc_task_history:
-        ready_to_start = stat['t_start'] - stat['t_ready']
-        duration = stat['t_finish'] - stat['t_start']
-        print(f"Worker {stat['worker']} | Task {stat['task_id']} | "
-              f"Wait: {ready_to_start:.4f}s | Run: {duration:.4f}s | "
-              f"Queue Len: {stat['q_len']}")
+    sys.stdout.flush()
+    torc_comm.barrier()
 
-    sys.stdout.flush()  # Force output to terminal before the next node prints
-    torc_comm.barrier()  # Wait for the current node to finish printing
-
+    # Reset stats for subsequent benchmark runs
     torc_created = 0
     torc_executed = 0
+    torc_stolen_executed = 0
     torc_total_steal_attempts = 0
     torc_total_stolen_bytes = 0
+    torc_overhead_scheduling = 0.0
+    torc_overhead_byte_count = 0.0
 
 
 def finalize():
