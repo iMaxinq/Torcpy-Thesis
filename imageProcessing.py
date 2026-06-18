@@ -1,50 +1,69 @@
 import cv2
-import numpy as np
 import time
-import runtime as torcpy
 import os
+import runtime as torcpy
 
-
-# Force OpenCV to use only 1 thread per process so that I can handle the scheduling
+# Force single-threaded execution for underlying libraries to prevent CPU oversubscription
 cv2.setNumThreads(1)
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
-def denoise(img_array):
-    # application logic. CPU intensive algorithm to denoise set of pictures
 
-    denoised = cv2.fastNlMeansDenoisingColored(img_array, None, h=10, hColor=10, templateWindowSize=7, searchWindowSize=15)
+def denoise(image):
+    # High-Granularity Compute: Non-Local Means Denoising
+    denoised = cv2.fastNlMeansDenoisingColored(
+        image, None, h=10, hColor=10,
+        templateWindowSize=7, searchWindowSize=25
+    )
+
+    # Medium Compute: Sharpening Filter
     blurred = cv2.GaussianBlur(denoised, (9, 9), 10.0)
     sharpened = cv2.addWeighted(denoised, 1.5, blurred, -0.5, 0)
 
-    return True
+    return sharpened
 
 
-def generate_synthetic_dataset(num_images=16):
-    """
-    Generates a homogeneous batch of 4K images directly in memory on Rank 0.
-    """
-    # flush=True forces the output through the MPI buffer immediately
-    print(f"[Rank 0] Generating {num_images} synthetic 4K images in RAM...", flush=True)
-    dataset = []
-    # Generate the heavy random math EXACTLY ONCE
-    base_img = np.random.randint(0, 255, (2160, 3840, 3), dtype=np.uint8)
-    for _ in range(num_images):
-        # Copying the memory block is near-instant
-        dataset.append(base_img.copy())
-    print(f"[Rank 0] Dataset generated successfully!", flush=True)
-    return dataset
+def extract_video_frames(video_path, max_frames=24):
+    print(f"[Rank 0] Opening video file: {video_path}...", flush=True)
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Could not open video file at {video_path}.")
+
+    frames = []
+    frame_count = 0
+
+    print(f"[Rank 0] Extracting up to {max_frames} frames", flush=True)
+    while frame_count < max_frames:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+        frame_count += 1
+
+    cap.release()
+    print(f"[Rank 0] Successfully extracted {len(frames)} frames.", flush=True)
+    return frames
 
 
 def main():
-    # number of images to process
-    num_images = 20
-    images = generate_synthetic_dataset(num_images)
+    video_filename = "input_noisy.mp4"
+    output_directory = "./output_frames"
+    max_frames_to_process = 20
 
-    print("\n" + "=" * 50)
-    print(f"STARTING BENCHMARK RUN USING SCHEDULER: {torcpy.TORC_SCHEDULING.upper()}")
-    print("=" * 50)
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+
+    try:
+        images = extract_video_frames(video_filename, max_frames=max_frames_to_process)
+    except Exception as e:
+        print(f"[Rank 0] ERROR loading video: {e}", flush=True)
+        return
+
+    print("\n" + "=" * 50, flush=True)
+    print(f"STARTING BENCHMARK RUN USING SCHEDULER: {torcpy.TORC_SCHEDULING.upper()}", flush=True)
+    print("=" * 50, flush=True)
 
     start_time = time.time()
     tasks = []
@@ -52,7 +71,7 @@ def main():
     for i, img in enumerate(images):
         task = torcpy.submit(denoise, img)
         tasks.append(task)
-        print(f"  -> Submitted task {i + 1}/{num_images} to the scheduler", flush=True)
+        print(f"  -> Submitted frame {i + 1}/{len(images)} to the scheduler", flush=True)
 
     print("[Rank 0] All tasks submitted. Awaiting cluster completion...", flush=True)
     torcpy.waitall()
@@ -60,11 +79,18 @@ def main():
     end_time = time.time()
     total_duration = end_time - start_time
 
-    print("\n" + "=" * 50)
-    print(f"BENCHMARK COMPLETED SUCCESSFULLY")
-    print(f"Total processing time: {total_duration:.2f} seconds")
-    print(f"Average throughput: {total_duration / num_images:.3f} seconds per image")
-    print("=" * 50 + "\n")
+    print("[Rank 0] Gathering results and saving denoised frames to disk...", flush=True)
+    for frame_idx, task in enumerate(tasks):
+        processed_frame = task.result()
+        output_path = os.path.join(output_directory, f"denoised_frame_{frame_idx:04d}.jpg")
+        cv2.imwrite(output_path, processed_frame)
+
+    print("\n" + "=" * 50, flush=True)
+    print(f"BENCHMARK COMPLETED SUCCESSFULLY", flush=True)
+    print(f"Total processing time: {total_duration:.2f} seconds", flush=True)
+    print(f"Average throughput: {total_duration / len(images):.3f} seconds per frame", flush=True)
+    print(f"All denoised frames saved by Rank 0 to: {output_directory}", flush=True)
+    print("=" * 50 + "\n", flush=True)
 
 
 if __name__ == "__main__":
