@@ -244,7 +244,7 @@ def _schedule_HEFT(args, kwargs):
         elif torc_hostnames[i] == my_hostname:
             comm_cost = total_task_bytes / torc_intra_rate_bps  # Same chip
         else:
-            comm_cost = total_task_bytes / torc_inter_rate_bps  # Via wifi
+            comm_cost = 2*total_task_bytes / torc_inter_rate_bps  # Via wifi
 
         # Load Cost
         current_tasks = torc_node_estimated_load[i] + torc_pending_tasks[i]
