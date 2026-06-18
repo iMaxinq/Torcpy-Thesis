@@ -2,7 +2,14 @@ import cv2
 import numpy as np
 import time
 import runtime as torcpy
+import os
 
+
+# Force OpenCV to use only 1 thread per process so that I can handle the scheduling
+cv2.setNumThreads(1)
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 
 def denoise(img_array):
     # application logic. CPU intensive algorithm to denoise set of pictures
