@@ -16,7 +16,6 @@ import threading
 import time
 import sys
 import os
-import traceback
 from termcolor import cprint
 from functools import partial
 
@@ -425,18 +424,13 @@ def _do_work(task):
     kwargs = task["kwargs"]
     task["t_start"] = time.time()
 
-    try:
-        if task["varg"]:
-            y = f(*args, **kwargs)
+    if task["varg"]:
+        y = f(*args, **kwargs)
+    else:
+        if args is None:  # to be safe
+            y = f()
         else:
-            if args is None:
-                y = f()
-            else:
-                y = f(args, **kwargs)
-    except Exception as e:
-        print(f"\n[Worker {node_id()}-{torc_tls.id}] CRASHED processing task: {e}")
-        traceback.print_exc()
-        y = None
+            y = f(args, **kwargs)
 
     task["t_finish"] = time.time()
 
