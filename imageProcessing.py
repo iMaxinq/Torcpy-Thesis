@@ -50,7 +50,7 @@ def extract_video_frames(video_path, max_frames=24):
 def main():
     video_filename = "input_noisy.mp4"
     output_directory = "./output_frames"
-    max_frames_to_process = 100
+    max_frames_to_process = 60
 
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
