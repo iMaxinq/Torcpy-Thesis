@@ -115,8 +115,7 @@ torc_sched_lock = threading.Lock()
 
 # Torc HEFT scheduling variables
 torc_hostnames = []
-torc_intra_rate_bps = float('inf')  # Bytes per second (Same Chip)
-torc_inter_rate_bps = float('inf')  # Bytes per second (Wi-Fi)
+torc_host_bandwidth_matrix = {}
 TORC_ESTIMATED_TASK_BYTES = 0
 torc_node_estimated_load = []
 torc_local_active_tasks = 0
@@ -211,10 +210,11 @@ def _schedule_weighted():
 
     return qid
 
+
 def _schedule_HEFT(args, kwargs):
     """Return the next worker id using Dynamic Earliest Finish Time."""
     global torc_node_benchmark_times
-    global torc_hostnames, torc_intra_rate_bps, torc_inter_rate_bps
+    global torc_hostnames, torc_host_bandwidth_matrix
     global TORC_ESTIMATED_TASK_BYTES
     global torc_overhead_byte_count
 
@@ -239,12 +239,19 @@ def _schedule_HEFT(args, kwargs):
         exec_cost = torc_node_benchmark_times[i]
 
         # Communication Cost
+        target_hostname = torc_hostnames[i]
+
         if i == node_id():
-            comm_cost = 0.0  # Same process
-        elif torc_hostnames[i] == my_hostname:
-            comm_cost = total_task_bytes / torc_intra_rate_bps  # Same chip
+            comm_cost = 0.0  # Same process, effectively zero cost
         else:
-            comm_cost = 2*total_task_bytes / torc_inter_rate_bps  # Via wifi
+            # Look up the rate in our dynamically built matrix
+            rate = torc_host_bandwidth_matrix[my_hostname][target_hostname]
+
+            if rate == float('inf') or rate == 0:
+                comm_cost = 0.0
+            else:
+                # Two-way communication: Send task + Receive result
+                comm_cost = (2.0 * total_task_bytes) / rate
 
         # Load Cost
         current_tasks = torc_node_estimated_load[i] + torc_pending_tasks[i]
@@ -1050,96 +1057,92 @@ def benchmark_io():
     return True
 
 # HEFT scheduling functions
-def _benchmark_network_rates(payload_bytes=1024 * 1024, iterations=10):
-    global torc_hostnames, torc_intra_rate_bps, torc_inter_rate_bps
+def _benchmark_network_rates(payload_bytes=5 * 1024 * 1024):
+    """Benchmarks host-to-host bandwidth using a single large payload between machine leaders."""
+    global torc_hostnames, torc_host_bandwidth_matrix
 
     my_hostname = MPI.Get_processor_name()
-    all_hostnames = torc_comm.allgather(my_hostname)  # all processor names sorted by rank
-
+    all_hostnames = torc_comm.allgather(my_hostname)
     me = node_id()
-    n_nodes = num_nodes()
 
-    local_target = None
-    remote_target = None
+    # 1. Group ranks by host to find our leaders and co-leaders
+    host_to_ranks = {}
+    for rank, host in enumerate(all_hostnames):
+        if host not in host_to_ranks:
+            host_to_ranks[host] = []
+        host_to_ranks[host].append(rank)
 
-    # Rank 0 figures out who to test with
-    if me == 0:
-        for i in range(1, n_nodes):
-            if all_hostnames[i] == my_hostname and local_target is None:
-                local_target = i
-            elif all_hostnames[i] != my_hostname and remote_target is None:
-                remote_target = i
+    unique_hosts = list(host_to_ranks.keys())
+    M = len(unique_hosts)
 
-    # Broadcast the chosen targets so those specific ranks know to participate
-    local_target, remote_target = torc_comm.bcast((local_target, remote_target), root=0)
+    # Matrix: matrix[host_A][host_B] = bps
+    local_matrix = {h: {h2: 0.0 for h2 in unique_hosts} for h in unique_hosts}
 
+    # 5MB dummy payload using bytearray for fast memory buffer transfers
     dummy_task = bytearray(payload_bytes)
 
-    # Intra-node benchmark (Local)
-    intra_rate = float('inf')
-    if local_target is not None:
-        if me == 0:
-            torc_comm.barrier()
-            times = []
-            for _ in range(iterations):
+    torc_comm.barrier()
+
+    # 2. INTRA-NODE BENCHMARK (Local memory/IPC) - O(M) overhead
+    for host in unique_hosts:
+        ranks = host_to_ranks[host]
+        local_rate = float('inf')  # Default if only 1 rank exists on this host
+
+        if len(ranks) >= 2:
+            src, dst = ranks[0], ranks[1]
+            if me == src:
                 t0 = time.time()
-                torc_comm.send(dummy_task, dest=local_target, tag=999)
-                torc_comm.recv(source=local_target, tag=999)
+                torc_comm.Send([dummy_task, MPI.BYTE], dest=dst, tag=998)
+                torc_comm.Recv([dummy_task, MPI.BYTE], source=dst, tag=998)
                 t1 = time.time()
-                times.append(t1 - t0)
+                local_rate = (2.0 * payload_bytes) / (t1 - t0)
+            elif me == dst:
+                torc_comm.Recv([dummy_task, MPI.BYTE], source=src, tag=998)
+                torc_comm.Send([dummy_task, MPI.BYTE], dest=src, tag=998)
 
-            avg_ping_pong = sum(times) / len(times)
-            avg_send_time = avg_ping_pong / 2.0
+            # Broadcast from the local src to everyone so the whole cluster knows this host's internal speed
+            local_rate = torc_comm.bcast(local_rate, root=src)
 
-            # bytes/sec rate
-            intra_rate = payload_bytes / avg_send_time
+        local_matrix[host][host] = local_rate
 
-        elif me == local_target:
-            torc_comm.barrier()
-            for _ in range(iterations):
-                msg = torc_comm.recv(source=0, tag=999)
-                torc_comm.send(msg, dest=0, tag=999)
-        else:
-            torc_comm.barrier()
+    # 3. INTER-NODE BENCHMARK (Host-to-Host) - O(M^2) overhead
+    for i in range(M):
+        for j in range(i + 1, M):
+            host_src = unique_hosts[i]
+            host_dst = unique_hosts[j]
+            src = host_to_ranks[host_src][0]  # Leader of host 1
+            dst = host_to_ranks[host_dst][0]  # Leader of host 2
 
-    # Inter-node benchmark (Wi-Fi/Network)
-    inter_rate = float('inf')
-    if remote_target is not None:
-        if me == 0:
-            torc_comm.barrier()
-            times = []
-            for _ in range(iterations):
+            rate = 0.0
+            if me == src:
                 t0 = time.time()
-                torc_comm.send(dummy_task, dest=remote_target, tag=999)
-                torc_comm.recv(source=remote_target, tag=999)
+                torc_comm.Send([dummy_task, MPI.BYTE], dest=dst, tag=999)
+                torc_comm.Recv([dummy_task, MPI.BYTE], source=dst, tag=999)
                 t1 = time.time()
-                times.append(t1 - t0)
+                rate = (2.0 * payload_bytes) / (t1 - t0)
+            elif me == dst:
+                torc_comm.Recv([dummy_task, MPI.BYTE], source=src, tag=999)
+                torc_comm.Send([dummy_task, MPI.BYTE], dest=src, tag=999)
 
-            avg_ping_pong = sum(times) / len(times)
-            avg_send_time = avg_ping_pong / 2.0
+            # Broadcast the rate to all nodes
+            rate = torc_comm.bcast(rate, root=src)
+            local_matrix[host_src][host_dst] = rate
+            local_matrix[host_dst][host_src] = rate
 
-            # bytes/sec rate
-            inter_rate = payload_bytes / avg_send_time
-
-        elif me == remote_target:
-            torc_comm.barrier()
-            for _ in range(iterations):
-                msg = torc_comm.recv(source=0, tag=999)
-                torc_comm.send(msg, dest=0, tag=999)
-        else:
-            torc_comm.barrier()
-
-    intra_rate = torc_comm.bcast(intra_rate, root=0)
-    inter_rate = torc_comm.bcast(inter_rate, root=0)
-
-    with torc_sched_lock:  # not needed now but could be later
+    # 4. Update global state
+    with torc_sched_lock:
         torc_hostnames = all_hostnames
-        torc_intra_rate_bps = intra_rate
-        torc_inter_rate_bps = inter_rate
+        torc_host_bandwidth_matrix = local_matrix
 
     if me == 0:
         _torc_log.info(
-            f"Network Bench: Intra-node = {intra_rate / 1e6:.2f} MB/s | Inter-node = {inter_rate / 1e6:.2f} MB/s")
+            f"Network Bench: Completed host-to-host matrix for {M} machines using {payload_bytes / 1e6:.1f}MB payload.")
+        for h1 in unique_hosts:
+            for h2 in unique_hosts:
+                # Print only one side of the symmetric matrix, and include the intra-node speed
+                if unique_hosts.index(h1) <= unique_hosts.index(h2):
+                    mbps = local_matrix[h1][h2] / 1e6 if local_matrix[h1][h2] != float('inf') else float('inf')
+                    _torc_log.info(f"  {h1} <-> {h2}: {mbps:.2f} MB/s")
 
 def _calculate_base_task_bytes():
     global TORC_ESTIMATED_TASK_BYTES
