@@ -61,19 +61,22 @@ def main():
         print(f"[Rank 0] ERROR loading video: {e}", flush=True)
         return
 
-    print("\n" + "=" * 50, flush=True)
-    print(f"STARTING BENCHMARK RUN USING SCHEDULER: {torcpy.TORC_SCHEDULING.upper()}", flush=True)
-    print("=" * 50, flush=True)
+    print("\n" + "=" * 50)
+    print(f"STARTING BENCHMARK RUN USING SCHEDULER: {torcpy.TORC_SCHEDULING.upper()}")
+    print("=" * 50)
 
     start_time = time.time()
     tasks = []
 
     for i, img in enumerate(images):
+        t0 = time.time()
         task = torcpy.submit(denoise, img)
-        tasks.append(task)
-        print(f"  -> Submitted frame {i + 1}/{len(images)} to the scheduler", flush=True)
 
-    print("[Rank 0] All tasks submitted. Awaiting cluster completion...", flush=True)
+        print(f"submit {i}: {(time.time() - t0):.3f}s")
+        tasks.append(task)
+        # print(f"  -> Submitted frame {i + 1}/{len(images)} to the scheduler", flush=True)
+
+    # print("[Rank 0] All tasks submitted. Awaiting cluster completion...", flush=True)
     torcpy.waitall()
 
     end_time = time.time()
