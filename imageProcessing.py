@@ -2,7 +2,6 @@ import cv2
 import time
 import os
 import runtime as torcpy
-import gc
 
 # Force single-threaded execution for underlying libraries to prevent CPU oversubscription
 cv2.setNumThreads(1)
@@ -66,35 +65,28 @@ def main():
     print(f"STARTING BENCHMARK RUN USING SCHEDULER: {torcpy.TORC_SCHEDULING.upper()}")
     print("=" * 50)
 
-    CHUNK_SIZE = 20
     start_time = time.time()
+    tasks = []
 
-    for i in range(0, len(images), CHUNK_SIZE):
-        chunk_images = images[i: i + CHUNK_SIZE]
-        tasks = []
+    for i, img in enumerate(images):
+        t0 = time.time()
+        task = torcpy.submit(denoise, img)
 
-        print(f"[Rank 0] Submitting chunk {i // CHUNK_SIZE + 1} (Frames {i} to {i + len(chunk_images) - 1})", flush=True)
+        print(f"submit {i}: {(time.time() - t0):.3f}s")
+        tasks.append(task)
+        # print(f"  -> Submitted frame {i + 1}/{len(images)} to the scheduler", flush=True)
 
-        for img in chunk_images:
-            task = torcpy.submit(denoise, img)
-            tasks.append(task)
-
-        torcpy.waitall()
-
-        # process results and write to disk immediately
-        for j, task in enumerate(tasks):
-            global_frame_idx = i + j
-            processed_frame = task.result()
-            output_path = os.path.join(output_directory, f"denoised_frame_{global_frame_idx:04d}.jpg")
-            cv2.imwrite(output_path, processed_frame)
-
-        # free memory before the next loop
-        del tasks
-        del chunk_images
-        gc.collect()  # Force Python to clear the unreferenced memory
+    # print("[Rank 0] All tasks submitted. Awaiting cluster completion...", flush=True)
+    torcpy.waitall()
 
     end_time = time.time()
     total_duration = end_time - start_time
+
+    print("[Rank 0] Gathering results and saving denoised frames to disk...", flush=True)
+    for frame_idx, task in enumerate(tasks):
+        processed_frame = task.result()
+        output_path = os.path.join(output_directory, f"denoised_frame_{frame_idx:04d}.jpg")
+        cv2.imwrite(output_path, processed_frame)
 
     print("\n" + "=" * 50, flush=True)
     print(f"BENCHMARK COMPLETED SUCCESSFULLY", flush=True)
