@@ -848,6 +848,10 @@ def _print_stats():
     global torc_overhead_scheduling, torc_overhead_byte_count
 
     me = node_id()
+
+    global_stolen_bytes = torc_comm.reduce(torc_total_stolen_bytes, op=MPI.SUM, root=0)
+    global_steal_attempts = torc_comm.reduce(torc_total_steal_attempts, op=MPI.SUM, root=0)
+
     msg = f"\nTORCPY: node[{me}]: created={torc_created}, executed={torc_executed}, stolen_executed={torc_stolen_executed}"
     steal_msg = f"        node[{me}]: total steal attempts={torc_total_steal_attempts}, stolen bytes={torc_total_stolen_bytes} bytes"
     overhead_msg = f"        node[{me}]: OVERHEADS -> Scheduling: {torc_overhead_scheduling:.6f}s | Byte Count: {torc_overhead_byte_count:.6f}s"
@@ -855,6 +859,13 @@ def _print_stats():
     cprint(msg, "green")
     cprint(steal_msg, "cyan")
     cprint(overhead_msg, "yellow")
+
+    if me == 0:
+        total_stolen_mb = global_stolen_bytes / (1024 * 1024)
+        cprint(f"\n================ GLOBAL STEAL SUMMARY ================", "cyan")
+        cprint(f"Total steal attempts across all nodes: {global_steal_attempts}", "cyan")
+        cprint(f"Total data stolen in execution:        {total_stolen_mb:.2f} MB", "cyan")
+        cprint(f"======================================================\n", "cyan")
 
     sys.stdout.flush()
     torc_comm.barrier()
