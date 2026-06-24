@@ -672,29 +672,32 @@ def _server():
                     t["type"] = "stolen"
                 torc_comm.send(t, dest=source_rank, tag=TORC_STEAL_RESPONSE_TAG)
 
-        has_load_update_msg = torc_comm.Iprobe(source=MPI.ANY_SOURCE, tag=TORC_HEARTBEAT_TAG, status=status)
-        if has_load_update_msg:
-            source_rank = status.Get_source()
-            q_size = torc_comm.recv(source=source_rank, tag=TORC_HEARTBEAT_TAG, status=status)
-            torc_node_estimated_load[source_rank] = q_size
+        has_load_update_msg = False
+        if TORC_SCHEDULING == "heft":
+
+            has_load_update_msg = torc_comm.Iprobe(source=MPI.ANY_SOURCE, tag=TORC_HEARTBEAT_TAG, status=status)
+            if has_load_update_msg:
+                source_rank = status.Get_source()
+                q_size = torc_comm.recv(source=source_rank, tag=TORC_HEARTBEAT_TAG, status=status)
+                torc_node_estimated_load[source_rank] = q_size
+
+            now = time.time()
+
+            if now - last_load_update >= TORC_LOAD_UPDATE_INTERVAL:
+                local_q_size = sum(torc_q[i].qsize() for i in range(TORC_QUEUE_LEVELS))
+                torc_node_estimated_load[node_id()] = local_q_size
+
+                for i in range(num_nodes()):
+                    if i != node_id():
+                        req = torc_comm.isend(local_q_size, dest=i, tag=TORC_HEARTBEAT_TAG)
+                        active_reqs.append(req)
+
+                last_load_update = now
+
+            active_reqs = [req for req in active_reqs if not req.Test()]
 
         if not has_server_msg and not has_load_update_msg:
             time.sleep(TORC_SERVER_YIELDTIME)
-
-        now = time.time()
-
-        if now - last_load_update >= TORC_LOAD_UPDATE_INTERVAL:
-            local_q_size = sum(torc_q[i].qsize() for i in range(TORC_QUEUE_LEVELS))
-            torc_node_estimated_load[node_id()] = local_q_size
-
-            for i in range(num_nodes()):
-                if i != node_id():
-                    req = torc_comm.isend(local_q_size, dest=i, tag=TORC_HEARTBEAT_TAG)
-                    active_reqs.append(req)
-
-            last_load_update = now
-
-        active_reqs = [req for req in active_reqs if not req.Test()]
 
 
 """
