@@ -74,7 +74,7 @@ def main():
 
         print(f"submit {i}: {(time.time() - t0):.3f}s")
         tasks.append(task)
-        # print(f"  -> Submitted frame {i + 1}/{len(images)} to the scheduler", flush=True)
+        print(f"  -> Submitted frame {i + 1}/{len(images)} to the scheduler", flush=True)
 
     # print("[Rank 0] All tasks submitted. Awaiting cluster completion...", flush=True)
     torcpy.waitall()
