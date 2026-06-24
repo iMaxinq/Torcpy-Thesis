@@ -250,8 +250,7 @@ def _schedule_HEFT(args, kwargs):
             if rate == float('inf') or rate == 0:
                 comm_cost = 0.0
             else:
-                # Two-way communication: Send task + Receive result
-                comm_cost = (2.0 * total_task_bytes) / rate
+                comm_cost = total_task_bytes / rate
 
         # Load Cost
         current_tasks = torc_node_estimated_load[i] + torc_pending_tasks[i]
