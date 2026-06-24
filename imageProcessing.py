@@ -73,7 +73,7 @@ def main():
         chunk_images = images[i: i + CHUNK_SIZE]
         tasks = []
 
-        print(f"[Rank 0] Submitting chunk {i // CHUNK_SIZE + 1} (Frames {i} to {i + len(chunk_images) - 1})")
+        print(f"[Rank 0] Submitting chunk {i // CHUNK_SIZE + 1} (Frames {i} to {i + len(chunk_images) - 1})", flush=True)
 
         for img in chunk_images:
             task = torcpy.submit(denoise, img)
