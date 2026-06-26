@@ -14,7 +14,7 @@ def denoise(image):
     # High-Granularity Compute: Non-Local Means Denoising
     denoised = cv2.fastNlMeansDenoisingColored(
         image, None, h=10, hColor=10,
-        templateWindowSize=4, searchWindowSize=20
+        templateWindowSize=2, searchWindowSize=2
     )
 
     # Medium Compute: Sharpening Filter
@@ -50,7 +50,7 @@ def extract_video_frames(video_path, max_frames=24):
 def main():
     video_filename = "input_noisy.mp4"
     output_directory = "./output_frames"
-    max_frames_to_process = 100
+    max_frames_to_process = 400
 
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
