@@ -14,7 +14,7 @@ def denoise(image):
     # High-Granularity Compute: Non-Local Means Denoising
     denoised = cv2.fastNlMeansDenoisingColored(
         image, None, h=10, hColor=10,
-        templateWindowSize=4, searchWindowSize=9
+        templateWindowSize=7, searchWindowSize=20
     )
 
     # Medium Compute: Sharpening Filter
