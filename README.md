@@ -91,9 +91,8 @@ Create a file named `hostfile` (or `machinefile`) describing the available clust
 Example:
 
 ```text
-localhost slots=1
-192.168.1.101 slots=1
-192.168.1.102 slots=1
+192.168.1.101:1
+192.168.1.102:2
 ```
 
 ---
