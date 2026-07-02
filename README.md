@@ -11,8 +11,10 @@ The system is designed to ingest a video file, extract its constituent frames, d
 To deploy and execute this framework within a distributed cluster environment, the following dependencies are required:
 
 * A **Linux-based Operating System** (e.g., Ubuntu/Debian distributions) on all constituent nodes.
-* **Python 3.7** or higher.
-* A functional installation of **MPICH** or **OpenMPI**.
+* **Python 3.10** or higher.
+* MPICH 5.0.0.
+* mpi4py 4.1.1
+* OpenCV 4.13.0
 
 ---
 
@@ -75,7 +77,7 @@ source venv/bin/activate
 Install the required Python packages:
 
 ```bash
-pip install mpi4py opencv-python termcolor coloredlogs
+pip install mpi4py==4.1.1 opencv-python==4.13.0 termcolor coloredlogs
 ```
 
 ---
